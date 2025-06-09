@@ -1,0 +1,42 @@
+﻿{
+  "City": {
+    "Id": {
+      "type": "int",
+      "nullable": false
+    },
+    "Name": {
+      "type": "string",
+      "nullable": false
+    }
+  },
+  "Employee": {
+    "Id": {
+      "type": "int",
+      "nullable": false
+    },
+    "Name": {
+      "type": "string",
+      "nullable": false
+    },
+    "CityId": {
+      "type": "int",
+      "nullable": false,
+      "ref": "City"
+    }
+  },
+  "BankAccount": {
+    "Id": {
+      "type": "int",
+      "nullable": false
+    },
+    "Name": {
+      "type": "string",
+      "nullable": false
+    },
+    "EmployeeId": {
+      "type": "int",
+      "nullable": false,
+      "ref": "Employee"
+    }
+  }
+}
