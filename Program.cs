@@ -1,18 +1,23 @@
-﻿using _1.Context;
-using _1.Methods;
-using _1.Models;
+﻿using _1.FKs;
 using _1.Schema;
-using _1.SqlBuilder;
 using _1.StaticFiles;
-using Microsoft.EntityFrameworkCore;
-using Newtonsoft.Json.Linq;
+
+//        HashSet<string> sqlKeywords = new()
+//{
+//    "MUTATION", "QUERY", "SELECT", "DISTINCT", "TOP", "FROM",
+//    "JOIN", "WHERE", "AND", "OR", "BETWEEN", "IN", "LIKE", "IS NULL", "IS NOT NULL", "EXISTS",
+//    "GROUP BY", "HAVING",
+//    "SUM", "AVG", "MIN", "MAX", "COUNT",
+//    "ORDER BY", "OFFSET", "FETCH",
+//    "UNION", "INTERSECT",
+//    "CASE", "ISNULL",
+//    "INSERT", "UPDATE", "DELETE", "EXEC",
+//    "CREATE", "ALTER", "DROP", "TRUNCATE", "RENAME", "COMMENT"
+//};
+
 
 /*
 #region Basic
-
-
-
-
 
 using var context = new _1.Context.AppLicationContext();
 
@@ -92,236 +97,63 @@ var bankAccounts = new List<BankAccount>
 context.BankAccounts.AddRange(bankAccounts);
 context.SaveChanges();
 
-
 #endregion
 
 */
 
 
-//    private static void Main(string[] args)
-//    {
-//        var context = new AppLicationContext();
-
-//        var requestJson = JObject.Parse(@"{
-//    ""Cities"": {
-//        ""Name"": true,
-//        ""Employees"": {
-//            ""Name"": true,
-//            ""BankAccounts"": {
-//                ""Name"": true
-//            }
-//        }
-//    }
-//}");
-
-
-//        var q = SqlM.Query()
-//            .Select(x => x
-//            .SqlSelectField(SN.BankAccount.EmployeeId, "employeeId"))
-//            .Select(x => x
-//            .SqlSelectField(SN.Employee.Name, "arsalan"))
-//            .From(SN.Employee.Table).Top(10)
-//            ;
-
-
-
-
-
-
-
-
-//Dictionary<string, Dictionary<string, PropertySchema>> schema2 =
-//new()
-//{
-//    ["City"] = new Dictionary<string, PropertySchema>
-//    {
-//        ["Id"] = new(typeof(int), false),
-//        ["Name"] = new(typeof(string), false)
-//    },
-//    ["Employee"] = new Dictionary<string, PropertySchema>
-//    {
-//        ["Id"] = new(typeof(int), false),
-//        ["Name"] = new(typeof(string), false),
-//        ["CityId"] = new(typeof(int), false, new(1, "City.Id"))
-//    },
-//    ["BankAccount"] = new Dictionary<string, PropertySchema>
-//    {
-//        ["Id"] = new(typeof(int), false),
-//        ["Name"] = new(typeof(string), false),
-//        ["EmployeeId"] = new(typeof(int), false, new(2, "Employee.Id"))
-//    }
-//};
-
-Dictionary<string, Dictionary<(string foreignKey, string tableName), string>?> Fks = new()
+internal class Program
 {
-    ["City"] = null,
-    ["Test1"] = null,
-    ["Employee"] = new Dictionary<(string, string), string>
+    private static void Main(string[] args)
     {
-        [("Test2.Id", "Test2s")] = "Test2Id",
-        [("City.Id", "Cities")] = "CityId"
-    },
-    ["BankAccount"] = new Dictionary<(string, string), string>
-    {
-        [("Employee.Id", "Employees")] = "EmployeeId"
-    },
-    ["Test2"] = new Dictionary<(string, string), string>
-    {
-        [("Test1.Id", "Test1s")] = "Test1Id"
-    },
-    ["UnboundClass"] = new Dictionary<(string, string), string>
-    {
-        [("Employee.Id", "Employess")] = "EmployeeId"
-    },
-};
+        SchemaStore.Initialize(FKs.Fks);
 
 
 
-var schema = new Schema(Fks).SchemaStructure;
-//------------------------------------front and then back------------------------
-var front = Query
-    .From(SN.City.Table)
-    .Select((SN.Employee.Name, "e.name"), (SN.Test1.Table, "T1"), (SN.City.Name, "c.name"))
-    .Where(SqlCondition
-    .Or(SqlCondition
-    .And(SqlCondition
-    .Single(SN.Employee.Id, Operator.Equal, SN.City.Name), SqlCondition
-    .Single(SN.City.Name, Operator.Like, "A%"))))
-    .Join(SN.Test2.Table, JoinType.Inner)
-    .Join(SN.UnboundClass.Table, JoinType.Right)
-    .Distinct()
-    .Page(10, 20)
-    .OrderBy(SN.City.Id).ToTransport();
+        //------------------------------------front and then back------------------------
+        var front = Query
+            .From(SN.City.Table)
+            .Select((SN.Employee.Name, "e.name"), (SN.Test1.Table, "T1"), (SN.City.Name, "c.name"))
+            .Where(SqlCondition
+            .Or(SqlCondition
+            .And(SqlCondition
+            .Single(SN.Employee.Id, Operator.Equal, SN.City.Name), SqlCondition
+            .Single(SN.City.Name, Operator.Like, "A%"))))
+            .Join(SN.Test2.Table, JoinType.Inner)
+            .Join(SN.UnboundClass.Table, JoinType.Right)
+            .Distinct()
+            .Page(10, 20)
+            .OrderBy(SN.City.Id).ToTransport();
 
 
-var BacksideFromFront = Query
-    .ParseFromJson(front)
-    .ToExecutable(schema);
+        //var BacksideFromFront = Query
+        //    .ParseFromJson(front)
+        //    .ToExecutable(SchemaStore.Instance.SchemaStructure);
 
 
 
-//----------------------------------backonly----------------------------------------
-var back = Query
-    .From(SN.City.Table)
-    .Select((SN.Employee.Name, "e.name"), (SN.Test1.Table, "T1"), (SN.City.Name, "c.name"))
-    .Where(SqlCondition
-    .Or(SqlCondition
-    .And(SqlCondition
-    .Single(SN.Employee.Id, Operator.Equal, SN.City.Name), SqlCondition
-    .Single(SN.City.Name, Operator.Like, "A%"))))
-    .Join(SN.Test2.Table, JoinType.Inner)
-    .Join(SN.UnboundClass.Table, JoinType.Right)
-    .Distinct()
-    .Page(10, 20)
-    .OrderBy(SN.City.Id)
-    .ToExecutable(schema);
+        //----------------------------------backonly----------------------------------------
+        var backQuery = Query
+            .From(SN.City.Table)
+            .Select((SN.Employee.Name, "e.name"), (SN.Test1.Table, "T1"), (SN.City.Name, "c.name"))
+            .Join(SN.Employee.Table, JoinType.Left, SN.Employee.Table)
+            .Join(SN.BankAccount.Table, JoinType.Left, SN.Employee.Table)
+            .ToExecutable(SchemaStore.Instance.SchemaStructure);
+
+        
+
+        Console.WriteLine(backQuery);
 
 
 
 
-Console.WriteLine(schema.ToString());
-
-//var builder = new SqlBuilder(schema, context.Model);
-//var query = builder.BuildQuery(requestJson);
-//Console.WriteLine($"query: {query}");
+        Console.WriteLine(SchemaStore.Instance.ToString());
 
 
-//using var conn = context.Database.GetDbConnection();
-//conn.Open();
+        var result = SchemaStore.Instance.FindSchemaByPathMatch("City_Employee_BankAccount");
+        Console.WriteLine($"{result.Property}       {result.ReferenceTable}   {result.Path}    {result.ReferenceProperty}   {result.IsNullable}  {result.Type}");
 
-//using var command = conn.CreateCommand();
-//command.CommandText = query;
-//Console.WriteLine();
-
-//using var reader = command.ExecuteReader();
-
-//while (reader.Read())
-//{
-//    for (int i = 0; i < reader.FieldCount; i++)
-//    {
-//        Console.Write($"{reader.GetName(i)} = {reader.GetValue(i)}; ");
-//    }
-//    Console.WriteLine();
-//}
-
-
-
-
-
-//        HashSet<string> sqlKeywords = new()
-//{
-//    "MUTATION", "QUERY", "SELECT", "DISTINCT", "TOP", "FROM",
-//    "JOIN", "WHERE", "AND", "OR", "BETWEEN", "IN", "LIKE", "IS NULL", "IS NOT NULL", "EXISTS",
-//    "GROUP BY", "HAVING",
-//    "SUM", "AVG", "MIN", "MAX", "COUNT",
-//    "ORDER BY", "OFFSET", "FETCH",
-//    "UNION", "INTERSECT",
-//    "CASE", "ISNULL",
-//    "INSERT", "UPDATE", "DELETE", "EXEC",
-//    "CREATE", "ALTER", "DROP", "TRUNCATE", "RENAME", "COMMENT"
-//};
-
-//        var requestJson2 = JObject.Parse(@"
-//{
-//  ""query"": {
-//    ""select"": [""city.name"", ""bankaccount.name""],
-//    ""top"": 10,
-//    ""orderby"": ""employee.phonenumber"",
-//    ""join"": [""left"", ""right""],
-//    ""where"": {
-//      ""or"": [
-//        {
-//          ""and"": [
-//            { ""like"": [""A%"", ""bankaccount.name""] },
-//            { ""like"": [""1%"", ""bankaccount.BankNumer""] }
-//          ]
-//        },
-//        {
-//          ""and"": [
-//            { ""like"": [""A%"", ""employee.name""] },
-//            { ""like"": [""1%"", ""employee.phonenumber""] }
-//          ]
-//        }
-//      ]
-//    }
-//  }
-//}
-//");
-
-
-//Json.JsonReader(requestJson2, sqlKeywords);
-//var matches = Json.matches;
-
-//foreach (var item in matches)
-//{
-//    foreach (var item2 in item.Keys)
-//    {
-//        Console.WriteLine($"key: {item2.key}    path: {item2.path}");
-//    }
-//}
-
-//var entities = Json.GetAllEntitiesFromMatches();
-//var matchedKey = Json.FindExactSecondLevelKey(schema.SchemaStructure, entities);
-
-
-
-//Console.WriteLine(matchedKey);
-
-
-
-
-
-//    }
-//}
-
-//class JsonDictionary
-//{
-//    public string Type { get; set; }  // query or ...
-//    public string[] Select { get; set; }
-//    public int? Top { get; set; }
-//    //public Join[]? Join { get; set; }
-//    //public OrderBy[]? OrderBies { get; set; }
-//}
-
-
-
+        result = SchemaStore.Instance.FindSchemaByPathMatch(new List<string> { "Employee", "City", "BankAccount" });
+        Console.WriteLine($"{result.Property}       {result.ReferenceTable}   {result.Path}    {result.ReferenceProperty}   {result.IsNullable}  {result.Type}");
+    }
+}

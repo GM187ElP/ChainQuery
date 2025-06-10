@@ -1,4 +1,5 @@
 ﻿using _1.Schema;
+using System.Text;
 using System.Text.Json;
 
 public enum Operator
@@ -98,7 +99,7 @@ public class Query
 {
     private string _fromTable = "";
     private readonly List<string> _selectColumns = new();
-    private readonly List<(string Table, JoinType Type)> _joins = new();
+    private readonly List<(string Table, JoinType Type, string fromTable)> _joins = new();
     private SqlCondition? _whereCondition;
     private bool _distinct = false;
     private string? _orderByColumn;
@@ -122,14 +123,17 @@ public class Query
             if (string.IsNullOrEmpty(alias))
                 _selectColumns.Add(tableOrProperty);
             else
-                _selectColumns.Add($"{tableOrProperty} AS {alias}");
+            {
+                var al = alias.Contains('.') ? alias : alias + ".*";
+                _selectColumns.Add($"{tableOrProperty} AS {al}");
+            }
         }
         return this;
     }
 
-    public Query Join(string tableName, JoinType joinType)
+    public Query Join(string tableName, JoinType joinType, string? fromTable = null)
     {
-        _joins.Add((tableName, joinType));
+        _joins.Add((tableName, joinType, fromTable ?? _fromTable));
         return this;
     }
 
@@ -216,7 +220,7 @@ public class Query
     {
         public string FromTable { get; set; } = "";
         public List<string> SelectColumns { get; set; } = new();
-        public List<(string Table, JoinType Type)> Joins { get; set; } = new();
+        public List<(string Table, JoinType Type, string fromTable)> Joins { get; set; } = new();
         public ConditionDto? WhereCondition { get; set; } // ✅ structured
         public bool Distinct { get; set; }
         public string? OrderByColumn { get; set; }
@@ -269,19 +273,49 @@ public class Query
     }
 
 
-    // Generate executable SQL string (simplified)
-    public string ToExecutable(Dictionary<string, Dictionary<string, PropertySchema>> schema) 
+    public string ToExecutable(Dictionary<string, Dictionary<string, PropertySchema>> schema)
     {
-        var sb = new System.Text.StringBuilder();
+        var sb = new StringBuilder();
 
+        // 1. SELECT clause
         sb.Append("SELECT ");
         if (_distinct) sb.Append("DISTINCT ");
         sb.Append(_selectColumns.Count > 0 ? string.Join(", ", _selectColumns) : "*");
 
-        sb.Append(" FROM ").Append(_fromTable);
+        // 2. FROM and JOINs
+        var tableAliases = new Dictionary<string, string>();
+        int aliasCounter = 0;
 
-        foreach (var (table, joinType) in _joins)
+        // Get base (FROM) table and alias
+        string fromTableName = schema[_fromTable]
+            .Values.FirstOrDefault(t => !string.IsNullOrEmpty(t.TableName))?.TableName ?? _fromTable;
+        string fromAlias = "T" + aliasCounter++;
+        tableAliases[_fromTable] = fromAlias;
+        sb.Append($" FROM {fromTableName} {fromAlias}");
+
+        // JOINs
+        foreach (var (joinEntity, joinType, joinSourceEntity) in _joins)
         {
+            Console.WriteLine($"JOIN: {joinEntity}, {joinType}, {joinSourceEntity}");
+            // Defensive: Check for null or bad joinSourceEntity
+            if (string.IsNullOrEmpty(joinSourceEntity) || !schema.ContainsKey(joinSourceEntity))
+                throw new Exception($"Schema does not contain joinSourceEntity: '{joinSourceEntity}'");
+
+            string joinPath = $"{joinSourceEntity}_{joinEntity}";
+
+            // Find the (propertyName, joinInfo) pair, not just the value!
+            var joinKvp = schema[joinSourceEntity]
+                .FirstOrDefault(ps => ps.Value.Paths != null && ps.Value.Paths.Contains(joinPath));
+            if (joinKvp.Equals(default(KeyValuePair<string, PropertySchema>)))
+                throw new Exception($"No join info for path {joinPath}");
+
+            string propertyName = joinKvp.Key;
+            PropertySchema joinInfo = joinKvp.Value;
+
+            string joinTableName = joinInfo.TableName ?? joinEntity;
+            string joinAlias = "T" + aliasCounter++;
+            tableAliases[joinEntity] = joinAlias;
+
             string joinStr = joinType switch
             {
                 JoinType.Inner => "INNER JOIN",
@@ -290,20 +324,25 @@ public class Query
                 JoinType.Full => "FULL JOIN",
                 _ => throw new NotSupportedException()
             };
-            sb.Append($" {joinStr} {table}");
+
+            sb.Append($" {joinStr} {joinTableName} {joinAlias} ON ");
+            sb.Append($"{joinAlias}.{propertyName} = {tableAliases[joinSourceEntity]}.{joinInfo.ReferenceProperty.Split('.').Last()}");
         }
 
+        // 3. WHERE clause
         if (_whereCondition != null)
         {
             sb.Append(" WHERE ").Append(_whereCondition.ToSql());
         }
 
+        // 4. ORDER BY
         if (!string.IsNullOrEmpty(_orderByColumn))
         {
             sb.Append(" ORDER BY ").Append(_orderByColumn);
             sb.Append(_orderByAscending ? " ASC" : " DESC");
         }
 
+        // 5. Pagination
         if (_fetch.HasValue)
         {
             if (!_offset.HasValue) _offset = 0;
