@@ -1,4 +1,7 @@
-﻿using _1.Schema;
+﻿using _1.FKs;
+using _1.Schema;
+using _1.StaticFiles;
+using Microsoft.IdentityModel.Tokens;
 using System.Text;
 using System.Text.Json;
 
@@ -98,8 +101,8 @@ public class OrGroup : SqlCondition
 public class Query
 {
     private string _fromTable = "";
-    private readonly List<string> _selectColumns = new();
-    private readonly List<(string Table, JoinType Type, string fromTable)> _joins = new();
+    private readonly List<(string Expression, string? Alias)> _selectColumns = new();
+    private readonly List<(string Table, JoinType JoinType, string OnClause)> _joins = new();
     private SqlCondition? _whereCondition;
     private bool _distinct = false;
     private string? _orderByColumn;
@@ -121,15 +124,17 @@ public class Query
         foreach (var (tableOrProperty, alias) in columns)
         {
             if (string.IsNullOrEmpty(alias))
-                _selectColumns.Add(tableOrProperty);
+            {
+                _selectColumns.Add((tableOrProperty, null));
+            }
             else
             {
-                var al = alias.Contains('.') ? alias : alias + ".*";
-                _selectColumns.Add($"{tableOrProperty} AS {al}");
+                _selectColumns.Add((tableOrProperty, alias));
             }
         }
         return this;
     }
+
 
     public Query Join(string tableName, JoinType joinType, string? fromTable = null)
     {
@@ -219,8 +224,8 @@ public class Query
     private class QueryDto
     {
         public string FromTable { get; set; } = "";
-        public List<string> SelectColumns { get; set; } = new();
-        public List<(string Table, JoinType Type, string fromTable)> Joins { get; set; } = new();
+        public List<(string Expression, string? Alias)> SelectColumns { get; set; } = new();
+        public List<(string Table, JoinType JoinType, string OnClause)> Joins { get; set; } = new();
         public ConditionDto? WhereCondition { get; set; } // ✅ structured
         public bool Distinct { get; set; }
         public string? OrderByColumn { get; set; }
@@ -272,84 +277,172 @@ public class Query
         return query;
     }
 
+    //var backQuery = Query
+    //         .From(SN.Employee.Table)
+    //         .Select((SN.BankAccount.Name, "b.name"), (SN.City.Name, "c.name"))
+    //         .Join(SN.City.Table, JoinType.Left, SN.Employee.Table)
+    //         .Join(SN.BankAccount.Table, JoinType.Left, SN.Employee.Table)
+    //         .ToExecutable(schema);
 
-    public string ToExecutable(Dictionary<string, Dictionary<string, PropertySchema>> schema)
+
+    public string ToExecutable(SchemaBuilder schemaBuilder)
     {
+        #region Init
+        var involvedTables = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { _fromTable };
+        foreach (var (tableName, _, _) in _joins)
+            involvedTables.Add(tableName);
+
+        foreach (var item in _selectColumns.Select(x => x.Expression).ToList())
+        {
+            var part0 = item.Contains('.') ? item.Split('.')[0] : item;
+            involvedTables.Add(part0);
+        }
+        involvedTables.Add(_fromTable);
+
+        var pathMatch = schemaBuilder.FindSchemaByTableNameFullPath(involvedTables.ToList());
+        if (pathMatch == null)
+            throw new InvalidOperationException("No path found connecting all involved tables.");
+
+        var entity2TableNames = pathMatch.TableNames;
+        var fullPath = pathMatch.Path;
+        string[] pathParts = [];
+
+        var joinInfoDict = new Dictionary<string, SchemaMatchResult>(StringComparer.OrdinalIgnoreCase);
+
+        if (fullPath.Count(x => x == '_') > 1)
+        {
+            pathParts = fullPath.Split('_', StringSplitOptions.RemoveEmptyEntries);
+            for (int i = 0; i < pathParts.Length - 1; i++)
+            {
+                var left = pathParts[i];
+                var right = pathParts[i + 1];
+
+                var keyForward = $"{left}_{right}";
+                var keyReverse = $"{right}_{left}";
+
+                var match = schemaBuilder.FindSchemaByPathMatch(keyForward)
+                          ?? schemaBuilder.FindSchemaByPathMatch(keyReverse);
+
+                if (match == null)
+                    throw new InvalidOperationException($"Cannot resolve join info for path segment: {left}-{right}");
+
+                joinInfoDict[$"{left}_{right}"] = match;
+            }
+        }
+        else
+        {
+            var match = schemaBuilder.FindSchemaByPathMatch(fullPath)
+                ?? schemaBuilder.FindSchemaByPathMatch(new string(fullPath.Reverse().ToArray()));
+
+            if (match == null)
+                throw new InvalidOperationException($"Cannot resolve join info for path segment: {fullPath}");
+
+            joinInfoDict[fullPath] = match;
+        }
+
+
+        #endregion
+
         var sb = new StringBuilder();
 
-        // 1. SELECT clause
-        sb.Append("SELECT ");
-        if (_distinct) sb.Append("DISTINCT ");
-        sb.Append(_selectColumns.Count > 0 ? string.Join(", ", _selectColumns) : "*");
+        // Alias resolver
+        string GetAlias(string table)
+        {
+            foreach (var (entity, tableName) in entity2TableNames)
+            {
+                if (tableName.Equals(table, StringComparison.OrdinalIgnoreCase))
+                    return entity.Substring(0, 1).ToLowerInvariant();
+            }
+            return table.Substring(0, 1).ToLowerInvariant();
+        }
 
-        // 2. FROM and JOINs
-        var tableAliases = new Dictionary<string, string>();
-        int aliasCounter = 0;
+        // SELECT
+        if (_selectColumns.Count > 0)
+        {
+            var selectParts = new List<string>();
+            foreach (var (expression, alias) in _selectColumns)
+            {
+                string entity;
+                string column = null;
 
-        // Get base (FROM) table and alias
-        string fromTableName = schema[_fromTable]
-            .Values.FirstOrDefault(t => !string.IsNullOrEmpty(t.TableName))?.TableName ?? _fromTable;
-        string fromAlias = "T" + aliasCounter++;
-        tableAliases[_fromTable] = fromAlias;
-        sb.Append($" FROM {fromTableName} {fromAlias}");
+                var parts = expression.Split('.');
+                if (parts.Length != 2)
+                    column = "*";
+
+
+                entity = parts[0];
+                column = column ?? parts[1];
+
+                var match = entity2TableNames.FirstOrDefault(x => x.Entity.Equals(entity, StringComparison.OrdinalIgnoreCase));
+                if (match == default)
+                    throw new InvalidOperationException($"Unknown entity in SELECT: {entity}");
+
+                var tableAlias = GetAlias(match.TableName);
+                var columnAlias = !string.IsNullOrEmpty(alias) ? alias : column;
+
+                selectParts.Add($"{match.TableName}.{column} AS {columnAlias} ");
+            }
+            sb.AppendLine("SELECT " + string.Join(", ", selectParts));
+        }
+        else
+        {
+            sb.AppendLine("SELECT *");
+        }
+
+        // FROM
+        var fromAlias = GetAlias(_fromTable);
+        sb.AppendLine($"FROM {entity2TableNames.FirstOrDefault(x => x.Entity.Equals(_fromTable, StringComparison.OrdinalIgnoreCase)).TableName} AS {fromAlias} ");
 
         // JOINs
-        foreach (var (joinEntity, joinType, joinSourceEntity) in _joins)
+        for (int i = 0; i < pathParts.Length - 1; i++)
         {
-            Console.WriteLine($"JOIN: {joinEntity}, {joinType}, {joinSourceEntity}");
-            // Defensive: Check for null or bad joinSourceEntity
-            if (string.IsNullOrEmpty(joinSourceEntity) || !schema.ContainsKey(joinSourceEntity))
-                throw new Exception($"Schema does not contain joinSourceEntity: '{joinSourceEntity}'");
+            var left = pathParts[i];
+            var right = pathParts[i + 1];
+            var key = $"{left}_{right}";
 
-            string joinPath = $"{joinSourceEntity}_{joinEntity}";
+            if (!joinInfoDict.TryGetValue(key, out var joinInfo))
+                throw new InvalidOperationException($"Join info not found for key: {key}");
 
-            // Find the (propertyName, joinInfo) pair, not just the value!
-            var joinKvp = schema[joinSourceEntity]
-                .FirstOrDefault(ps => ps.Value.Paths != null && ps.Value.Paths.Contains(joinPath));
-            if (joinKvp.Equals(default(KeyValuePair<string, PropertySchema>)))
-                throw new Exception($"No join info for path {joinPath}");
+            var join = _joins.FirstOrDefault(j =>
+                j.Table.Equals(right, StringComparison.OrdinalIgnoreCase) ||
+                j.Table.Equals(left, StringComparison.OrdinalIgnoreCase));
 
-            string propertyName = joinKvp.Key;
-            PropertySchema joinInfo = joinKvp.Value;
-
-            string joinTableName = joinInfo.TableName ?? joinEntity;
-            string joinAlias = "T" + aliasCounter++;
-            tableAliases[joinEntity] = joinAlias;
-
-            string joinStr = joinType switch
+            var joinKeyword = join.JoinType switch
             {
-                JoinType.Inner => "INNER JOIN",
                 JoinType.Left => "LEFT JOIN",
                 JoinType.Right => "RIGHT JOIN",
                 JoinType.Full => "FULL JOIN",
-                _ => throw new NotSupportedException()
+                _ => "INNER JOIN"
             };
 
-            sb.Append($" {joinStr} {joinTableName} {joinAlias} ON ");
-            sb.Append($"{joinAlias}.{propertyName} = {tableAliases[joinSourceEntity]}.{joinInfo.ReferenceProperty.Split('.').Last()}");
+            var leftAlias = GetAlias(joinInfo.TableName);
+            var rightAlias = GetAlias(joinInfo.ReferenceTable);
+
+            sb.AppendLine($"{joinKeyword} {joinInfo.ReferenceTable} AS {rightAlias} ON {leftAlias}.{joinInfo.Property} = {rightAlias}.{joinInfo.ReferenceProperty.Split('.')[1]} ");
         }
 
-        // 3. WHERE clause
+        // WHERE
         if (_whereCondition != null)
-        {
-            sb.Append(" WHERE ").Append(_whereCondition.ToSql());
-        }
+            sb.AppendLine("WHERE " + _whereCondition.ToSql());
 
-        // 4. ORDER BY
+        // ORDER BY
         if (!string.IsNullOrEmpty(_orderByColumn))
         {
-            sb.Append(" ORDER BY ").Append(_orderByColumn);
-            sb.Append(_orderByAscending ? " ASC" : " DESC");
+            var dir = _orderByAscending ? "ASC" : "DESC";
+            sb.AppendLine($"ORDER BY {_orderByColumn} {dir}");
         }
 
-        // 5. Pagination
+        // Pagination
         if (_fetch.HasValue)
         {
-            if (!_offset.HasValue) _offset = 0;
-            sb.Append($" OFFSET {_offset} ROWS FETCH NEXT {_fetch} ROWS ONLY");
+            sb.AppendLine($"OFFSET {_offset.GetValueOrDefault(0)} ROWS");
+            sb.AppendLine($"FETCH NEXT {_fetch.Value} ROWS ONLY");
         }
 
-        return sb.ToString();
+        return sb.ToString().Trim();
     }
+
+
+
 }
 

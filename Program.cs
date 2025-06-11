@@ -130,30 +130,29 @@ internal class Program
         //    .ParseFromJson(front)
         //    .ToExecutable(SchemaStore.Instance.SchemaStructure);
 
+        var schema = new SchemaBuilder(FKs.Fks);
 
-
-        //----------------------------------backonly----------------------------------------
         var backQuery = Query
-            .From(SN.City.Table)
-            .Select((SN.Employee.Name, "e.name"), (SN.Test1.Table, "T1"), (SN.City.Name, "c.name"))
-            .Join(SN.Employee.Table, JoinType.Left, SN.Employee.Table)
-            .Join(SN.BankAccount.Table, JoinType.Left, SN.Employee.Table)
-            .ToExecutable(SchemaStore.Instance.SchemaStructure);
+             .From(SN.Employee.Table)
+             .Select((SN.BankAccount.Name, "b.name"), (SN.City.Name, "c.name"))
+             .Join(SN.City.Table, JoinType.Left, SN.Employee.Table)
+             .Join(SN.BankAccount.Table, JoinType.Left, SN.Employee.Table)
+             .ToExecutable(schema);
 
-        
+
 
         Console.WriteLine(backQuery);
 
+        //var tablename = schema.FindTableName("Employee");
 
-
-
+        Console.WriteLine();
         Console.WriteLine(SchemaStore.Instance.ToString());
 
-
-        var result = SchemaStore.Instance.FindSchemaByPathMatch("City_Employee_BankAccount");
-        Console.WriteLine($"{result.Property}       {result.ReferenceTable}   {result.Path}    {result.ReferenceProperty}   {result.IsNullable}  {result.Type}");
-
-        result = SchemaStore.Instance.FindSchemaByPathMatch(new List<string> { "Employee", "City", "BankAccount" });
-        Console.WriteLine($"{result.Property}       {result.ReferenceTable}   {result.Path}    {result.ReferenceProperty}   {result.IsNullable}  {result.Type}");
     }
 }
+    //    var result = SchemaStore.Instance.FindSchemaByPathMatch("City_Employee_BankAccount");
+    //    Console.WriteLine($"{result.Property}       {result.ReferenceTable}   {result.Path}    {result.ReferenceProperty}   {result.IsNullable}  {result.Type}");
+
+    //    result = SchemaStore.Instance.FindSchemaByPathMatch(new List<string> { "Employee", "City", "BankAccount" });
+    //    Console.WriteLine($"{result.Property}       {result.ReferenceTable}   {result.Path}    {result.ReferenceProperty}   {result.IsNullable}  {result.Type}");
+    //}

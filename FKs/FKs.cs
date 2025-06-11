@@ -8,26 +8,27 @@ namespace _1.FKs;
 
 public class FKs
 {
-    public static Dictionary<string, Dictionary<(string foreignKey, string foreignKeytableName), (string property, string table)>?> Fks = new()
+    public static Dictionary<string, (string tableName, Dictionary<(string foreignKey, string foreignKeytableName), string>? foreignKeys)> Fks = new()
     {
-        ["City"] = null,
-        ["Test1"] = null,
-        ["Employee"] = new Dictionary<(string, string), (string, string)>
+        ["City"] = ("Cities", null),
+        ["Test1"] = ("Test1s", null),
+        ["Employee"] = ("Employees", new Dictionary<(string, string), string>
         {
-            [("Test2.Id", "Test2s")] = ("Test2Id", "Employees"),
-            [("City.Id", "Cities")] = ("CityId", "Employees")
-        },
-        ["BankAccount"] = new Dictionary<(string, string), (string, string)>
+            [("Test2.Id", "Test2s")] = "Test2Id",
+            [("City.Id", "Cities")] = "CityId"
+        }),
+        ["BankAccount"] = ("BankAccounts", new Dictionary<(string, string), string>
         {
-            [("Employee.Id", "Employees")] = ("EmployeeId", "BankAccounts")
-        },
-        ["Test2"] = new Dictionary<(string, string), (string, string)>
+            [("Employee.Id", "Employees")] = "EmployeeId"
+        }),
+        ["Test2"] = ("Test2s", new Dictionary<(string, string), string>
         {
-            [("Test1.Id", "Test1s")] = ("Test1Id", "Test2s")
-        },
-        ["UnboundClass"] = new Dictionary<(string, string), (string, string)>
+            [("Test1.Id", "Test1s")] = "Test1Id"
+        }),
+        ["UnboundClass"] = ("UnboundClasses", new Dictionary<(string, string), string>
         {
-            [("Employee.Id", "Employees")] = ("EmployeeId", "UnboundClasses")
-        },
+            [("Employee.Id", "Employees")] = "EmployeeId"
+        })
     };
 }
+

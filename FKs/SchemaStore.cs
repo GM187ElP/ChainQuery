@@ -11,7 +11,7 @@ public static class SchemaStore
 {
     public static SchemaBuilder Instance { get; private set; }
 
-    public static void Initialize(Dictionary<string, Dictionary<(string, string), (string,string)>?> fks)
+    public static void Initialize(Dictionary<string, (string tableName, Dictionary<(string foreignKey, string foreignKeytableName), string>? foreignKeys)> fks)
     {
         if (Instance == null)
             Instance = new SchemaBuilder(fks);

@@ -1,4 +1,5 @@
-﻿using System.Reflection;
+﻿using Microsoft.EntityFrameworkCore.Metadata.Internal;
+using System.Reflection;
 using System.Text;
 
 namespace _1.Schema;
@@ -7,11 +8,11 @@ public class SchemaBuilder
 {
     public Dictionary<string, Dictionary<string, PropertySchema>> SchemaStructure = new();
 
-    public SchemaBuilder(Dictionary<string, Dictionary<(string foreignKey, string foreignKeyTableName), (string property, string table)>?> fks)
+    public SchemaBuilder(Dictionary<string, (string tableName, Dictionary<(string foreignKey, string foreignKeytableName), string>? foreignKeys)> fks)
         => SchemaStructure = CreateSchema(fks);
 
     private static Dictionary<string, Dictionary<string, PropertySchema>> CreateSchema(
-        Dictionary<string, Dictionary<(string foreignKey, string foreignKeyTableName), (string property, string table)>?> fks)
+        Dictionary<string, (string tableName, Dictionary<(string, string), string>? foreignKeys)> fks)
     {
         var schema = new Dictionary<string, Dictionary<string, PropertySchema>>();
         var assembly = Assembly.GetExecutingAssembly();
@@ -19,6 +20,7 @@ public class SchemaBuilder
         foreach (var entity in fks.Keys)
         {
             schema[entity] = new();
+            schema[entity]["TableName"] = new PropertySchema(typeof(string), false, null, null, null, fks[entity].Item1); // Inserted here
 
             var entityType = assembly.GetTypes().FirstOrDefault(t => t.Name == entity);
             if (entityType == null) continue;
@@ -26,11 +28,13 @@ public class SchemaBuilder
             var allProperties = entityType.GetProperties();
             var fkPropertyNames = new HashSet<string>();
 
-            // Collect all FK property names for this entity
-            if (fks[entity] != null)
+            var foreignKeyDict = fks[entity].Item2;
+
+            // Collect FK property names
+            if (foreignKeyDict != null)
             {
-                foreach (var pair in fks[entity])
-                    fkPropertyNames.Add(pair.Value.property);
+                foreach (var pair in foreignKeyDict)
+                    fkPropertyNames.Add(pair.Value);
             }
 
             // Add normal (non-FK) properties
@@ -41,18 +45,18 @@ public class SchemaBuilder
                     schema[entity][prop.Name] = new PropertySchema(
                         prop.PropertyType,
                         IsNullable(prop),
-                        null,         // ReferenceProperty
-                        null,         // ReferenceTable
-                        null,         // Paths
-                        null          // TableName: only set for FK
+                        null,
+                        null,
+                        null,
+                        null
                     );
                 }
             }
 
             // Add FK properties
-            if (fks[entity] != null)
+            if (foreignKeyDict != null)
             {
-                foreach (var ((foreignKey, tableName), (localPropName, localTableName)) in fks[entity])
+                foreach (var ((foreignKey, tableName), localPropName) in foreignKeyDict)
                 {
                     var localPropInfo = entityType.GetProperty(localPropName);
                     if (localPropInfo == null) continue;
@@ -65,7 +69,7 @@ public class SchemaBuilder
                         localPropName,
                         foreignKey,
                         tableName,
-                        localTableName,
+                        fks[entity].Item1,
                         new List<string>(),
                         schema,
                         fks,
@@ -87,7 +91,7 @@ public class SchemaBuilder
         string localTableName,
         List<string> currentPath,
         Dictionary<string, Dictionary<string, PropertySchema>> schema,
-        Dictionary<string, Dictionary<(string, string), (string, string)>?> fks,
+        Dictionary<string, (string tableName, Dictionary<(string, string), string>? foreignKeys)> fks,
         Type propType = null,
         bool propNullable = false)
     {
@@ -104,7 +108,7 @@ public class SchemaBuilder
                 fkTarget,
                 referenceTable,
                 new List<string> { fullKey },
-                localTableName // TableName only set for FK
+                localTableName
             );
             schema[rootEntity][localPropName] = ps;
         }
@@ -122,12 +126,13 @@ public class SchemaBuilder
                 existing.Paths.Add(fullKey);
         }
 
-        if (fks.ContainsKey(fkEntity) && fks[fkEntity] != null)
+        if (fks.ContainsKey(fkEntity) && fks[fkEntity].foreignKeys != null)
         {
+            var foreignKeyDict = fks[fkEntity].foreignKeys!;
             var assembly = Assembly.GetExecutingAssembly();
             var fkEntityType = assembly.GetTypes().FirstOrDefault(t => t.Name == fkEntity);
 
-            foreach (var ((nextFk, nextTable), (nextLocalProp, nextLocalTable)) in fks[fkEntity])
+            foreach (var ((nextFk, nextTable), nextLocalProp) in foreignKeyDict)
             {
                 Type subPropType = typeof(int);
                 bool subPropNullable = false;
@@ -148,7 +153,7 @@ public class SchemaBuilder
                     localPropName,
                     nextFk,
                     nextTable,
-                    nextLocalTable,
+                    fks[fkEntity].Item1,
                     newPath,
                     schema,
                     fks,
@@ -186,21 +191,14 @@ public class SchemaBuilder
 
                 string line = $"   [\"{prop.Key}\"] = {typeName}, {nullable}";
 
-                // Print TableName (child table) if present (i.e., only for FK)
                 if (!string.IsNullOrEmpty(prop.Value.TableName))
-                {
                     line += $", Table: \"{prop.Value.TableName}\"";
-                }
 
                 if (!string.IsNullOrEmpty(prop.Value.ReferenceProperty))
-                {
                     line += $", \"{prop.Value.ReferenceProperty}\"";
-                }
 
                 if (!string.IsNullOrEmpty(prop.Value.ReferenceTable))
-                {
                     line += $", \"{prop.Value.ReferenceTable}\"";
-                }
 
                 if (prop.Value.Paths?.Count > 0)
                 {
@@ -214,8 +212,7 @@ public class SchemaBuilder
                 sb.AppendLine(line);
             }
 
-            sb.AppendLine("},");
-            sb.AppendLine();
+            sb.AppendLine("},\n");
         }
 
         return sb.ToString();
@@ -243,8 +240,7 @@ public class SchemaBuilder
             }
 
             var typeName = genericDef.Name.Split('`')[0];
-            var args = type.GetGenericArguments()
-                .Select(GetFriendlyTypeName);
+            var args = type.GetGenericArguments().Select(GetFriendlyTypeName);
             return $"{typeName}<{string.Join(", ", args)}>";
         }
 
@@ -264,13 +260,13 @@ public class SchemaBuilder
         };
     }
 
-    public SchemaMatchResult? FindSchemaByPathMatch(List<string> keys)
+    public SchemaMatchTableAndPath? FindSchemaByTableNameFullPath(List<string> keys)
     {
         var expected = new HashSet<string>(keys, StringComparer.OrdinalIgnoreCase);
 
-        foreach (var entity in this.SchemaStructure)
+        foreach (var (entityName, properties) in SchemaStructure)
         {
-            foreach (var (propertyKey, propertySchema) in entity.Value)
+            foreach (var (propertyKey, propertySchema) in properties)
             {
                 if (propertySchema.Paths == null)
                     continue;
@@ -280,23 +276,35 @@ public class SchemaBuilder
                     var parts = path.Split('_', StringSplitOptions.RemoveEmptyEntries);
                     var partSet = new HashSet<string>(parts, StringComparer.OrdinalIgnoreCase);
 
-                    if (partSet.SetEquals(expected))
-                    {
-                        return new SchemaMatchResult(
-                            Property: propertyKey,
-                            Type: propertySchema.Type,
-                            IsNullable: propertySchema.Nullable,
-                            ReferenceProperty: propertySchema.ReferenceProperty ?? "",
-                            ReferenceTable: propertySchema.ReferenceTable ?? "",
-                            TableName: propertySchema.TableName ?? "",
-                            Path: path
-                        );
-                    }
+                    if (!partSet.SetEquals(expected))
+                        continue;
+
+                    var tableList = parts
+                        .Select(entity => (Entity: entity, TableName: FindTableName(entity)))
+                        .ToList();
+
+                    return new SchemaMatchTableAndPath(
+                        TableNames: tableList,
+                        Path: path
+                    );
                 }
             }
         }
 
         return null;
+    }
+
+
+    public string FindTableName(string entity)
+    {
+        if (SchemaStructure.TryGetValue(entity, out var properties) &&
+            properties.TryGetValue("TableName", out var tableNameSchema) &&
+            !string.IsNullOrEmpty(tableNameSchema.TableName))
+        {
+            return tableNameSchema.TableName;
+        }
+
+        return "UNKNOWN";
     }
 
     public SchemaMatchResult? FindSchemaByPathMatch(string path)
@@ -348,15 +356,15 @@ public class PropertySchema
         ReferenceProperty = referenceProperty;
         ReferenceTable = referenceTable;
         Paths = paths;
-        TableName = tableName; // Only set for FK properties
+        TableName = tableName;
     }
 
     public Type Type { get; set; }
     public bool Nullable { get; set; }
-    public string? ReferenceProperty { get; set; }  // like "Employee.Id"
-    public string? ReferenceTable { get; set; }     // like "Employees"
+    public string? ReferenceProperty { get; set; }
+    public string? ReferenceTable { get; set; }
     public List<string>? Paths { get; set; }
-    public string? TableName { get; set; }          // Only set for FK properties
+    public string? TableName { get; set; }
 }
 
 public record SchemaMatchResult(
@@ -367,3 +375,9 @@ public record SchemaMatchResult(
     string ReferenceTable,
     string TableName,
     string Path);
+
+
+public record SchemaMatchTableAndPath(
+    List<(string Entity, string TableName)> TableNames,
+    string Path
+);
