@@ -393,9 +393,11 @@ public class Query
         var fromAlias = GetAlias(_fromTable);
         sb.AppendLine($"FROM {entity2TableNames.FirstOrDefault(x => x.Entity.Equals(_fromTable, StringComparison.OrdinalIgnoreCase)).TableName} AS {fromAlias} ");
 
+        var count = 0;
         // JOINs
         for (int i = 0; i < pathParts.Length - 1; i++)
         {
+
             var left = pathParts[i];
             var right = pathParts[i + 1];
             var key = $"{left}_{right}";
