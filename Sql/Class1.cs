@@ -1,12 +1,11 @@
-﻿using _1.FKs;
-using _1.Schema;
-using _1.StaticFiles;
+﻿using _1.Schema;
 using Microsoft.IdentityModel.Tokens;
 using System.Data.SqlClient;
 using System.Linq.Expressions;
 using System.Reflection;
 using System.Text;
-using System.Text.Json;
+
+// --- Enums and SqlCondition Classes ---
 
 public enum Operator
 {
@@ -101,9 +100,29 @@ public class OrGroup : SqlCondition
         "(" + string.Join(" OR ", Conditions.Select(c => c.ToSql())) + ")";
 }
 
-public class Query
+// --- QueryBuilder and Query<TDto> ---
+
+public class QueryBuilder
 {
-    public string _fromTable = "";
+    private readonly string _connectionString;
+    private readonly SchemaBuilder _schemaBuilder;
+
+    public QueryBuilder(string connectionString, SchemaBuilder schemaBuilder)
+    {
+        _connectionString = connectionString;
+        _schemaBuilder = schemaBuilder;
+    }
+
+    public Query<TDto> Query<TDto>() where TDto : new()
+        => new Query<TDto>(_connectionString, _schemaBuilder);
+}
+
+public class Query<TDto> where TDto : new()
+{
+    private readonly string _connectionString;
+    private readonly SchemaBuilder _schemaBuilder;
+
+    private string _fromTable = "";
     private readonly List<(string Expression, string? Alias)> _selectColumns = new();
     private readonly List<(string Table, JoinType JoinType, string OnClause)> _joins = new();
     private SqlCondition? _whereCondition;
@@ -113,184 +132,138 @@ public class Query
     private int? _offset = null;
     private int? _fetch = null;
 
-    protected Query() { }
-
-    public static Query From(string tableName)
+    internal Query(string connectionString, SchemaBuilder schemaBuilder)
     {
-        var qb = new Query();
-        qb._fromTable = tableName;
-        return qb;
+        _connectionString = connectionString;
+        _schemaBuilder = schemaBuilder;
     }
 
-    public Query Select(params (string tableOrProperty, string? alias)[] columns)
+    public Query<TDto> From(string tableName)
     {
-        foreach (var (tableOrProperty, alias) in columns)
+        _fromTable = tableName;
+        return this;
+    }
+
+    public Query<TDto> Select(params (string sourceColumn, Expression<Func<TDto, object>> dtoProperty)[] columns)
+    {
+        foreach (var (source, expr) in columns)
         {
-            if (string.IsNullOrEmpty(alias))
-            {
-                _selectColumns.Add((tableOrProperty, null));
-            }
-            else
-            {
-                _selectColumns.Add((tableOrProperty, alias));
-            }
+            string alias = GetPropertyName(expr);
+            _selectColumns.Add((source, alias));
         }
         return this;
     }
 
-
-    public Query Join(string tableName, JoinType joinType, string? fromTable = null)
+    public Query<TDto> Join(string tableName, JoinType joinType, string? fromTable = null)
     {
         _joins.Add((tableName, joinType, fromTable ?? _fromTable));
         return this;
     }
 
-    public Query Where(SqlCondition condition)
+    public Query<TDto> Where(SqlCondition condition)
     {
         _whereCondition = condition;
         return this;
     }
 
-    public Query Distinct()
+    public Query<TDto> Distinct()
     {
         _distinct = true;
         return this;
     }
 
-    public Query OrderBy(string column, bool ascending = true)
+    public Query<TDto> OrderBy(string column, bool ascending = true)
     {
         _orderByColumn = column;
         _orderByAscending = ascending;
         return this;
     }
 
-    public Query Offset(int skip, int take)
+    public Query<TDto> Offset(int skip, int take)
     {
         _offset = skip;
         _fetch = take;
         return this;
     }
 
-    public Query Page(int page, int pageSize)
+    public Query<TDto> Page(int page, int pageSize)
     {
         int skip = (page - 1) * pageSize;
         return Offset(skip, pageSize);
     }
 
-    // --- New Methods ---
-    public class ConditionDto
+    public List<TDto> ToList()
     {
-        public string? Type { get; set; } // "Single", "And", "Or"
-        public string? Left { get; set; }
-        public string? Right { get; set; }
-        public Operator? Operator { get; set; }
-        public List<ConditionDto>? Children { get; set; }
+        var sql = ToExecutable();
+        var data = ExecuteQuery(sql);
+        return MapToDtos(data);
+    }
 
-        public static ConditionDto FromSqlCondition(SqlCondition cond)
+    public TDto? FirstOrDefault() => ToList().FirstOrDefault();
+
+    // ---- Internals ----
+
+    private string GetPropertyName(Expression<Func<TDto, object>> expr)
+    {
+        if (expr.Body is MemberExpression member)
+            return member.Member.Name;
+        if (expr.Body is UnaryExpression unary && unary.Operand is MemberExpression member2)
+            return member2.Member.Name;
+        throw new InvalidOperationException("Expression must be a property access");
+    }
+
+    private List<Dictionary<string, object?>> ExecuteQuery(string sql)
+    {
+        var results = new List<Dictionary<string, object?>>();
+        using (var connection = new SqlConnection(_connectionString))
         {
-            return cond switch
+            connection.Open();
+            using (var command = new SqlCommand(sql, connection))
             {
-                SingleCondition s => new ConditionDto
+                using (var reader = command.ExecuteReader())
                 {
-                    Type = "Single",
-                    Left = s.Left,
-                    Operator = s.Op,
-                    Right = s.Right
-                },
-                AndGroup and => new ConditionDto
-                {
-                    Type = "And",
-                    Children = and.Conditions.Select(FromSqlCondition).ToList()
-                },
-                OrGroup or => new ConditionDto
-                {
-                    Type = "Or",
-                    Children = or.Conditions.Select(FromSqlCondition).ToList()
-                },
-                _ => throw new NotSupportedException("Unknown SqlCondition")
-            };
+                    while (reader.Read())
+                    {
+                        var row = new Dictionary<string, object?>();
+                        for (int i = 0; i < reader.FieldCount; i++)
+                        {
+                            var columnName = reader.GetName(i);
+                            var value = reader.IsDBNull(i) ? null : reader.GetValue(i);
+                            row[columnName] = value;
+                        }
+                        results.Add(row);
+                    }
+                }
+            }
         }
+        return results;
+    }
 
-        public SqlCondition ToSqlCondition()
+    private List<TDto> MapToDtos(List<Dictionary<string, object?>> data)
+    {
+        var props = typeof(TDto).GetProperties(BindingFlags.Instance | BindingFlags.Public);
+        var result = new List<TDto>();
+
+        foreach (var row in data)
         {
-            return Type switch
+            var obj = new TDto();
+            foreach (var prop in props)
             {
-                "Single" => new SingleCondition(Left!, Operator!.Value, Right!),
-                "And" => new AndGroup(Children!.Select(c => c.ToSqlCondition())),
-                "Or" => new OrGroup(Children!.Select(c => c.ToSqlCondition())),
-                _ => throw new NotSupportedException("Unknown ConditionDto type")
-            };
+                var key = row.Keys.FirstOrDefault(k =>
+                    string.Equals(k, prop.Name, StringComparison.OrdinalIgnoreCase));
+                if (key != null && row[key] != null && prop.CanWrite)
+                {
+                    prop.SetValue(obj, Convert.ChangeType(row[key], prop.PropertyType));
+                }
+            }
+            result.Add(obj);
         }
+        return result;
     }
 
-    // DTO class for serialization
-    private class QueryDto
+    public string ToExecutable()
     {
-        public string FromTable { get; set; } = "";
-        public List<(string Expression, string? Alias)> SelectColumns { get; set; } = new();
-        public List<(string Table, JoinType JoinType, string OnClause)> Joins { get; set; } = new();
-        public ConditionDto? WhereCondition { get; set; } // ✅ structured
-        public bool Distinct { get; set; }
-        public string? OrderByColumn { get; set; }
-        public bool OrderByAscending { get; set; }
-        public int? Offset { get; set; }
-        public int? Fetch { get; set; }
-    }
-
-
-    // Serialize to JSON for transport (frontend -> backend)
-    public string ToTransport()
-    {
-        var dto = new QueryDto
-        {
-            FromTable = _fromTable,
-            SelectColumns = _selectColumns,
-            Joins = _joins,
-            WhereCondition = _whereCondition != null ? ConditionDto.FromSqlCondition(_whereCondition) : null,
-            Distinct = _distinct,
-            OrderByColumn = _orderByColumn,
-            OrderByAscending = _orderByAscending,
-            Offset = _offset,
-            Fetch = _fetch,
-        };
-        return JsonSerializer.Serialize(dto);
-    }
-
-
-    // Parse Query from JSON on backend
-    public static Query ParseFromJson(string json)
-    {
-        var dto = JsonSerializer.Deserialize<QueryDto>(json);
-        if (dto == null) throw new Exception("Invalid query JSON");
-
-        var query = new Query
-        {
-            _fromTable = dto.FromTable,
-            _distinct = dto.Distinct,
-            _orderByColumn = dto.OrderByColumn,
-            _orderByAscending = dto.OrderByAscending,
-            _offset = dto.Offset,
-            _fetch = dto.Fetch,
-            _whereCondition = dto.WhereCondition?.ToSqlCondition()
-        };
-
-        query._selectColumns.AddRange(dto.SelectColumns);
-        query._joins.AddRange(dto.Joins);
-
-        return query;
-    }
-
-    //var backQuery = Query
-    //         .From(SN.Employee.Table)
-    //         .Select((SN.BankAccount.Name, "b.name"), (SN.City.Name, "c.name"))
-    //         .Join(SN.City.Table, JoinType.Left, SN.Employee.Table)
-    //         .Join(SN.BankAccount.Table, JoinType.Left, SN.Employee.Table)
-    //         .ToExecutable(schema);
-
-
-    public string ToExecutable(SchemaBuilder schemaBuilder)
-    {
-        #region Init
+        // -- Begin your ToExecutable logic (as per your original code) --
         var involvedTables = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { _fromTable };
         foreach (var (tableName, _, _) in _joins)
             involvedTables.Add(tableName);
@@ -302,11 +275,34 @@ public class Query
         }
         involvedTables.Add(_fromTable);
 
-        var pathMatch = schemaBuilder.FindSchemaByTableNameFullPath(involvedTables.ToList());
+        var pathMatch = _schemaBuilder.FindSchemaByTableNameFullPath(involvedTables.ToList());
         if (pathMatch == null)
             throw new InvalidOperationException("No path found connecting all involved tables.");
 
         var entity2TableNames = pathMatch.TableNames;
+        string GetTableName(string table) => entity2TableNames.FirstOrDefault(t => t.Entity == table).TableName;  // get table names
+        Dictionary<string, string> aliases = [];
+
+        int count = 0;
+        foreach (var item in entity2TableNames)
+            SetAlias(item.TableName);
+
+        void SetAlias(string key)
+        {
+            if (!aliases.Keys.Any(x => x == key))
+            {
+                var al = key.Substring(0, 1).ToLowerInvariant();
+                if (aliases.Values.Any(x => x == al))
+                {
+                    al = "T" + count;
+                    count++;
+                }
+                aliases.Add(key, al);
+            }
+        }
+
+        string GetAlias(string key) => aliases[key];
+
         var fullPath = pathMatch.Path;
         string[] pathParts = [];
 
@@ -323,8 +319,8 @@ public class Query
                 var keyForward = $"{left}_{right}";
                 var keyReverse = $"{right}_{left}";
 
-                var match = schemaBuilder.FindSchemaByPathMatch(keyForward)
-                          ?? schemaBuilder.FindSchemaByPathMatch(keyReverse);
+                var match = _schemaBuilder.FindSchemaByPathMatch(keyForward)
+                          ?? _schemaBuilder.FindSchemaByPathMatch(keyReverse);
 
                 if (match == null)
                     throw new InvalidOperationException($"Cannot resolve join info for path segment: {left}-{right}");
@@ -334,8 +330,8 @@ public class Query
         }
         else
         {
-            var match = schemaBuilder.FindSchemaByPathMatch(fullPath)
-                ?? schemaBuilder.FindSchemaByPathMatch(new string(fullPath.Reverse().ToArray()));
+            var match = _schemaBuilder.FindSchemaByPathMatch(fullPath)
+                ?? _schemaBuilder.FindSchemaByPathMatch(new string(fullPath.Reverse().ToArray()));
 
             if (match == null)
                 throw new InvalidOperationException($"Cannot resolve join info for path segment: {fullPath}");
@@ -343,21 +339,19 @@ public class Query
             joinInfoDict[fullPath] = match;
         }
 
-
-        #endregion
-
         var sb = new StringBuilder();
 
+
         // Alias resolver
-        string GetAlias(string table)
-        {
-            foreach (var (entity, tableName) in entity2TableNames)
-            {
-                if (tableName.Equals(table, StringComparison.OrdinalIgnoreCase))
-                    return entity.Substring(0, 1).ToLowerInvariant();
-            }
-            return table.Substring(0, 1).ToLowerInvariant();
-        }
+        //string GetAlias(string table)
+        //{
+        //    foreach (var (entity, tableName) in entity2TableNames)
+        //    {
+        //        if (tableName.Equals(table, StringComparison.OrdinalIgnoreCase))
+        //            return entity.Substring(0, 2).ToLowerInvariant();
+        //    }
+        //    return table.Substring(0, 2).ToLowerInvariant();
+        //}
 
         // SELECT
         if (_selectColumns.Count > 0)
@@ -371,8 +365,6 @@ public class Query
                 var parts = expression.Split('.');
                 if (parts.Length != 2)
                     column = "*";
-
-
                 entity = parts[0];
                 column = column ?? parts[1];
 
@@ -380,10 +372,10 @@ public class Query
                 if (match == default)
                     throw new InvalidOperationException($"Unknown entity in SELECT: {entity}");
 
-                var tableAlias = GetAlias(match.TableName);
+                var tableAlias = GetAlias(GetTableName( match.TableName));
                 var columnAlias = !string.IsNullOrEmpty(alias) ? alias : column;
 
-                selectParts.Add($"{columnAlias} AS [{match.TableName}.{column}] ");
+                selectParts.Add($"{tableAlias}.{column.ToLowerInvariant()} AS [{alias}] ");
             }
             sb.AppendLine("SELECT " + string.Join(", ", selectParts));
         }
@@ -393,14 +385,12 @@ public class Query
         }
 
         // FROM
-        var fromAlias = GetAlias(_fromTable);
+        var fromAlias = GetAlias(GetTableName(_fromTable));
         sb.AppendLine($"FROM {entity2TableNames.FirstOrDefault(x => x.Entity.Equals(_fromTable, StringComparison.OrdinalIgnoreCase)).TableName} AS {fromAlias} ");
 
-        var count = 0;
         // JOINs
         for (int i = 0; i < pathParts.Length - 1; i++)
         {
-
             var left = pathParts[i];
             var right = pathParts[i + 1];
             var key = $"{left}_{right}";
@@ -423,15 +413,11 @@ public class Query
             var joinFromAlias = GetAlias(join.OnClause);
             var joinTableAlias = GetAlias(join.Table);
 
-            string GetTableName(string entity) =>
-                entity2TableNames.First(x => x.Entity == join.Table).TableName;
-
-            string on = "";
+            string on;
             if (join.Table == left)
                 on = $"{joinTableAlias}.{joinInfo.ReferenceProperty.Split('.')[1]} = {joinFromAlias}.{joinInfo.Property}";
             else
                 on = $"{joinTableAlias}.{joinInfo.Property} = {joinFromAlias}.{joinInfo.ReferenceProperty.Split('.')[1]}";
-
 
             sb.AppendLine($"{joinKeyword} {GetTableName(joinTableAlias)} AS {joinTableAlias} ON {on} ");
         }
@@ -455,132 +441,7 @@ public class Query
         }
 
         return sb.ToString().Trim();
+        // -- End your ToExecutable logic --
     }
-
-
-
 }
 
-
-
-
-//public class SqlAdoExecutor
-//{
-//    private readonly string _connectionString;
-
-//    public SqlAdoExecutor(string connectionString)
-//    {
-//        _connectionString = connectionString;
-//    }
-
-//    public List<Dictionary<string, object?>> ExecuteQuery(string sql)
-//    {
-//        var results = new List<Dictionary<string, object?>>();
-
-//        using (var connection = new SqlConnection(_connectionString))
-//        {
-//            connection.Open();
-
-//            using (var command = new SqlCommand(sql, connection))
-//            {
-//                using (var reader = command.ExecuteReader())
-//                {
-//                    while (reader.Read())
-//                    {
-//                        var row = new Dictionary<string, object?>();
-//                        for (int i = 0; i < reader.FieldCount; i++)
-//                        {
-//                            var columnName = reader.GetName(i);
-//                            var value = reader.IsDBNull(i) ? null : reader.GetValue(i);
-//                            row[columnName] = value;
-//                        }
-//                        results.Add(row);
-//                    }
-//                }
-//            }
-//        }
-
-//        return results;
-//    }
-//}
-
-
-
-//public class Query<T> : Query where T : new()
-//{
-//    // Map from DB column (string) to DTO property name
-//    private readonly List<(string DbColumn, string DtoProperty)> _selectMappings = new();
-
-//    // Use base constructor
-//    protected Query() : base() { }
-
-//    // New generic From
-//    public new static Query<T> From(string tableName)
-//    {
-//        var q = new Query<T>();
-//        q._fromTable = tableName;
-//        return q;
-//    }
-
-//    // Select accepting tuples: (dbColumn, dtoPropertySelector)
-//    public Query<T> Select(params (string DbColumn, Expression<Func<T, object>> DtoProperty)[] selections)
-//    {
-//        foreach (var (dbCol, expr) in selections)
-//        {
-//            // Extract property name from expression
-//            string propertyName = GetPropertyName(expr);
-//            if (propertyName == null)
-//                throw new ArgumentException("Only direct property access is supported in Select lambda.");
-
-//            _selectMappings.Add((dbCol, propertyName));
-//        }
-
-//        // Also call base.Select with (dbCol, alias=null)
-//        base.Select(_selectMappings.Select(x => (x.DbColumn, (string?)null)).ToArray());
-
-//        return this;
-//    }
-
-//    private static string? GetPropertyName(Expression<Func<T, object>> expr)
-//    {
-//        // Handles e => e.Property or e => (object)e.Property
-//        if (expr.Body is MemberExpression member)
-//        {
-//            return member.Member.Name;
-//        }
-//        else if (expr.Body is UnaryExpression unary && unary.Operand is MemberExpression memberOperand)
-//        {
-//            return memberOperand.Member.Name;
-//        }
-//        return null;
-//    }
-
-//    // Execute query and map to List<T>
-//    public List<T> ToList(SqlAdoExecutor executor, SchemaBuilder schemaBuilder)
-//    {
-//        var sql = this.ToExecutable(schemaBuilder);
-
-//        var rawRows = executor.ExecuteQuery(sql);
-
-//        // Map each row dictionary to T instance
-//        var result = new List<T>();
-//        foreach (var row in rawRows)
-//        {
-//            var instance = new T();
-//            foreach (var (dbCol, dtoProp) in _selectMappings)
-//            {
-//                if (row.TryGetValue($"[{_fromTable}.{dbCol}]", out var val) || row.TryGetValue(dbCol, out val))
-//                {
-//                    var prop = typeof(T).GetProperty(dtoProp, BindingFlags.Public | BindingFlags.Instance);
-//                    if (prop != null && val != null && val != DBNull.Value)
-//                    {
-//                        var safeVal = Convert.ChangeType(val, Nullable.GetUnderlyingType(prop.PropertyType) ?? prop.PropertyType);
-//                        prop.SetValue(instance, safeVal);
-//                    }
-//                }
-//            }
-//            result.Add(instance);
-//        }
-//        return result;
-//    }
-//}
