@@ -2,6 +2,9 @@
 using _1.Schema;
 using _1.StaticFiles;
 using Microsoft.IdentityModel.Tokens;
+using System.Data.SqlClient;
+using System.Linq.Expressions;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 
@@ -100,7 +103,7 @@ public class OrGroup : SqlCondition
 
 public class Query
 {
-    private string _fromTable = "";
+    public string _fromTable = "";
     private readonly List<(string Expression, string? Alias)> _selectColumns = new();
     private readonly List<(string Table, JoinType JoinType, string OnClause)> _joins = new();
     private SqlCondition? _whereCondition;
@@ -110,7 +113,7 @@ public class Query
     private int? _offset = null;
     private int? _fetch = null;
 
-    private Query() { }
+    protected Query() { }
 
     public static Query From(string tableName)
     {
@@ -380,7 +383,7 @@ public class Query
                 var tableAlias = GetAlias(match.TableName);
                 var columnAlias = !string.IsNullOrEmpty(alias) ? alias : column;
 
-                selectParts.Add($"{match.TableName}.{column} AS {columnAlias} ");
+                selectParts.Add($"{columnAlias} AS [{match.TableName}.{column}] ");
             }
             sb.AppendLine("SELECT " + string.Join(", ", selectParts));
         }
@@ -417,10 +420,20 @@ public class Query
                 _ => "INNER JOIN"
             };
 
-            var leftAlias = GetAlias(joinInfo.TableName);
-            var rightAlias = GetAlias(joinInfo.ReferenceTable);
+            var joinFromAlias = GetAlias(join.OnClause);
+            var joinTableAlias = GetAlias(join.Table);
 
-            sb.AppendLine($"{joinKeyword} {joinInfo.ReferenceTable} AS {rightAlias} ON {leftAlias}.{joinInfo.Property} = {rightAlias}.{joinInfo.ReferenceProperty.Split('.')[1]} ");
+            string GetTableName(string entity) =>
+                entity2TableNames.First(x => x.Entity == join.Table).TableName;
+
+            string on = "";
+            if (join.Table == left)
+                on = $"{joinTableAlias}.{joinInfo.ReferenceProperty.Split('.')[1]} = {joinFromAlias}.{joinInfo.Property}";
+            else
+                on = $"{joinTableAlias}.{joinInfo.Property} = {joinFromAlias}.{joinInfo.ReferenceProperty.Split('.')[1]}";
+
+
+            sb.AppendLine($"{joinKeyword} {GetTableName(joinTableAlias)} AS {joinTableAlias} ON {on} ");
         }
 
         // WHERE
@@ -448,3 +461,126 @@ public class Query
 
 }
 
+
+
+
+//public class SqlAdoExecutor
+//{
+//    private readonly string _connectionString;
+
+//    public SqlAdoExecutor(string connectionString)
+//    {
+//        _connectionString = connectionString;
+//    }
+
+//    public List<Dictionary<string, object?>> ExecuteQuery(string sql)
+//    {
+//        var results = new List<Dictionary<string, object?>>();
+
+//        using (var connection = new SqlConnection(_connectionString))
+//        {
+//            connection.Open();
+
+//            using (var command = new SqlCommand(sql, connection))
+//            {
+//                using (var reader = command.ExecuteReader())
+//                {
+//                    while (reader.Read())
+//                    {
+//                        var row = new Dictionary<string, object?>();
+//                        for (int i = 0; i < reader.FieldCount; i++)
+//                        {
+//                            var columnName = reader.GetName(i);
+//                            var value = reader.IsDBNull(i) ? null : reader.GetValue(i);
+//                            row[columnName] = value;
+//                        }
+//                        results.Add(row);
+//                    }
+//                }
+//            }
+//        }
+
+//        return results;
+//    }
+//}
+
+
+
+//public class Query<T> : Query where T : new()
+//{
+//    // Map from DB column (string) to DTO property name
+//    private readonly List<(string DbColumn, string DtoProperty)> _selectMappings = new();
+
+//    // Use base constructor
+//    protected Query() : base() { }
+
+//    // New generic From
+//    public new static Query<T> From(string tableName)
+//    {
+//        var q = new Query<T>();
+//        q._fromTable = tableName;
+//        return q;
+//    }
+
+//    // Select accepting tuples: (dbColumn, dtoPropertySelector)
+//    public Query<T> Select(params (string DbColumn, Expression<Func<T, object>> DtoProperty)[] selections)
+//    {
+//        foreach (var (dbCol, expr) in selections)
+//        {
+//            // Extract property name from expression
+//            string propertyName = GetPropertyName(expr);
+//            if (propertyName == null)
+//                throw new ArgumentException("Only direct property access is supported in Select lambda.");
+
+//            _selectMappings.Add((dbCol, propertyName));
+//        }
+
+//        // Also call base.Select with (dbCol, alias=null)
+//        base.Select(_selectMappings.Select(x => (x.DbColumn, (string?)null)).ToArray());
+
+//        return this;
+//    }
+
+//    private static string? GetPropertyName(Expression<Func<T, object>> expr)
+//    {
+//        // Handles e => e.Property or e => (object)e.Property
+//        if (expr.Body is MemberExpression member)
+//        {
+//            return member.Member.Name;
+//        }
+//        else if (expr.Body is UnaryExpression unary && unary.Operand is MemberExpression memberOperand)
+//        {
+//            return memberOperand.Member.Name;
+//        }
+//        return null;
+//    }
+
+//    // Execute query and map to List<T>
+//    public List<T> ToList(SqlAdoExecutor executor, SchemaBuilder schemaBuilder)
+//    {
+//        var sql = this.ToExecutable(schemaBuilder);
+
+//        var rawRows = executor.ExecuteQuery(sql);
+
+//        // Map each row dictionary to T instance
+//        var result = new List<T>();
+//        foreach (var row in rawRows)
+//        {
+//            var instance = new T();
+//            foreach (var (dbCol, dtoProp) in _selectMappings)
+//            {
+//                if (row.TryGetValue($"[{_fromTable}.{dbCol}]", out var val) || row.TryGetValue(dbCol, out val))
+//                {
+//                    var prop = typeof(T).GetProperty(dtoProp, BindingFlags.Public | BindingFlags.Instance);
+//                    if (prop != null && val != null && val != DBNull.Value)
+//                    {
+//                        var safeVal = Convert.ChangeType(val, Nullable.GetUnderlyingType(prop.PropertyType) ?? prop.PropertyType);
+//                        prop.SetValue(instance, safeVal);
+//                    }
+//                }
+//            }
+//            result.Add(instance);
+//        }
+//        return result;
+//    }
+//}
